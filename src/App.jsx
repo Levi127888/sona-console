@@ -97,16 +97,25 @@ Return only valid JSON matching this schema. No prose, no markdown.
 {"milestones":[{"ordinal":number,"title":string,"deliverable":string,"task_ids":string[],"is_scoping":boolean,"rationale":string}]}`,
   },
   generator: {
-    version: "gen.v1",
-    text: `You break a single task into the smallest possible physical steps, to defeat task-initiation paralysis. Starting must require zero decisions.
+    version: "gen.v2",
+    text: `You break a single task into small, immediately startable steps, to defeat task-initiation paralysis. Starting must require zero decisions. The content of the work stays the user's own.
+
+You usually know only the task's title. NEVER invent requirements, methods, structures, or content the title does not state. Your steps must fit ANY reasonable version of this task. If you are unsure how the task is meant to be done, stay method-agnostic — scaffold effort and size, never approach.
 
 RULES
-- Every step is a concrete, physical, observable action — something you could watch a person do.
-- Target 2–10 focused minutes per step. p90 (worst case) must stay under 15 minutes.
-- Step 1 is ALWAYS a trivial setup / friction-reducer: "Open your laptop.", "Open the document."
-- Step 2 is the first tiny piece of real work: "Write one sentence — any sentence — under the first heading."
+- Every step is a concrete, observable action — something you could watch a person do.
+- Step 1 is ALWAYS a trivial setup / friction-reducer: "Open the document.", "Open your laptop."
+- Step 2 is the first tiny piece of real work with the quality bar removed: "Write one messy sentence — any sentence."
+- Later steps size the next move; they never dictate its content:
+  GOOD: "Add three rough bullet points — out of order is fine."
+  GOOD: "Skim one source for five minutes."
+  BAD: "Draw three lines radiating from the center circle." (invented method)
+  BAD: "Use the first three words that come to mind." (dictates the user's content)
+- Quantities and durations are friction-reducers ("one sentence", "three rough bullets", "five minutes"), never requirements of the deliverable. When a quantity appears, the wording must make clear that rough, partial, or "any" counts.
+- Never tell the user WHAT to write, draw, choose, or conclude — only how small the next move is.
 - BANNED: mental verbs with no physical anchor — think, plan, consider, review, understand, decide, figure out, reflect. Convert any mental action to a physical one.
-- For each step, estimate p50 and p90 minutes. These estimates are the ONLY numbers you may produce besides n.
+- Each step carries one short permission-granting reassurance (max 6 words): "Just getting ready counts.", "No quality bar.", "Out of order is fine." Never praise, never pressure, never mention time remaining or falling behind.
+- For each step, estimate p50 and p90 minutes. Target 2–10 focused minutes per step; p90 (worst case) must stay under 15. These estimates are the ONLY numbers you may produce besides n.
 - Produce 4 to 7 steps. If more remain beyond this chunk, set more_steps_exist = true.
 
 TASK
@@ -115,18 +124,20 @@ cognitive_load: {cognitive_load}
 {failures_block}
 
 OUTPUT — strict JSON only:
-{"steps":[{"n":number,"action":string,"p50":number,"p90":number}],"more_steps_exist":boolean}`,
+{"steps":[{"n":number,"action":string,"reassurance":string,"p50":number,"p90":number}],"more_steps_exist":boolean}`,
   },
   critic: {
-    version: "critic.v1",
-    text: `You review micro-steps written for a person with ADHD. Your only job: verify each step is a genuinely physical, immediately startable action of honest size.
+    version: "critic.v2",
+    text: `You review micro-steps written for a person with ADHD. Your only job: verify each step is a genuinely startable action of honest size that leaves the content of the work to the user.
 
 FAIL a step if any of these hold:
-- It is not observable physical behavior (you could not watch someone do it).
-- It hides a decision or judgment ("choose", "figure out", "pick the best", "review").
+- It is not observable behavior (you could not watch someone do it).
+- It prescribes a method, structure, order, or content the task title does not state — invented procedures ("draw three lines from the center", "pick the leftmost branch") or dictated content ("use the first words that come to mind").
+- It hides an unbounded decision or judgment ("choose the best", "figure out", "review"). A bounded, explicitly safe choice PASSES: "add a bullet for anything that comes up — no wrong answers."
 - It chains multiple actions ("and then", "after that").
 - Its realistic worst case exceeds 15 minutes, whatever its stated p90 claims.
 - Its stated estimates look dishonest (a 2-minute label on 20-minute work).
+- Its reassurance pressures, praises, or mentions time remaining.
 
 Do not rewrite steps. Do not produce any number except step n. Judge, briefly.
 
@@ -166,15 +177,25 @@ Return only valid JSON: {"task_ids":string[],"line":string}`,
 /* ---------- deterministic core (pure, testable) ---------- */
 
 // §3.7 date solver. slackMode: "p10" (sign-consistent with §3.10a) | "spec" (§3.7 literal, p90)
+// Buffer-by-construction: planned dates target deadline − 15% of horizon (min 2d);
+// latest-safe stays anchored at the real deadline, so a feasible fresh route carries
+// genuine slack everywhere — including the terminal milestone (= the reserve itself).
+// Done-aware: completed tasks are excluded from pace and downstream sums, so re-solving
+// mid-route never degrades an on-track plan.
+const BUFFER_FRACTION = 0.15;
 function solveRoute(tasks, milestones, today, deadline, slackMode) {
   const totalDays = Math.max(1, daysBetween(today, deadline));
+  const reserveDays = Math.min(Math.max(2, Math.ceil(totalDays * BUFFER_FRACTION)), totalDays - 1);
+  const workDeadline = addDays(deadline, -Math.max(0, reserveDays)); // plan targets this
   const live = tasks.filter((t) => t.disposition !== "delete");
-  const totalP50 = live.reduce((s, t) => s + t.p50, 0);
-  const pace = totalP50 / totalDays; // derived min/day — L20, never declared
   const byId = Object.fromEntries(live.map((t) => [t.id, t]));
+  const remaining = live.filter((t) => !t.done);
+  const totalP50 = remaining.reduce((s, t) => s + t.p50, 0);
+  const paceDays = Math.max(1, daysBetween(today, workDeadline));
+  const pace = totalP50 / paceDays; // derived min/day over remaining work — L20, never declared
   const ms = [...milestones].sort((a, b) => a.ordinal - b.ordinal);
   const sums = ms.map((m) => {
-    const ts = m.task_ids.map((id) => byId[id]).filter(Boolean);
+    const ts = m.task_ids.map((id) => byId[id]).filter((t) => t && !t.done);
     return {
       p10: ts.reduce((s, t) => s + t.p10, 0),
       p50: ts.reduce((s, t) => s + t.p50, 0),
@@ -186,19 +207,26 @@ function solveRoute(tasks, milestones, today, deadline, slackMode) {
     const afterAlt = sums
       .slice(i + 1)
       .reduce((s, x) => s + (slackMode === "spec" ? x.p90 : x.p10), 0);
-    const planned = addDays(deadline, -Math.ceil(afterP50 / Math.max(pace, 0.001)));
+    const planned = addDays(workDeadline, -Math.ceil(afterP50 / Math.max(pace, 0.001)));
     const latestSafe = addDays(deadline, -Math.ceil(afterAlt / Math.max(pace, 0.001)));
     const slack = daysBetween(planned, latestSafe);
-    return { ...m, planned_date: planned, latest_safe_date: latestSafe, slack_days: slack };
+    const complete =
+      m.task_ids.length > 0 && m.task_ids.every((id) => !byId[id] || byId[id].done);
+    return { ...m, planned_date: planned, latest_safe_date: latestSafe, slack_days: slack, complete };
   });
-  return { pace, totalDays, totalP50, milestones: solved };
+  return { pace, totalDays, reserveDays, workDeadline, totalP50, milestones: solved };
 }
 
-// §3.10 rung-3 bands (proposed thresholds — Jan can override)
-function band(slackDays, daysToPlanned) {
-  const horizon = Math.max(1, daysToPlanned);
-  if (slackDays <= 2 || slackDays / horizon < 0.1) return "urgent";
-  if (slackDays / horizon < 0.25) return "notice";
+// §3.10 rung-3 bands — deviation-only. A freshly confirmed route has deviated from
+// nothing, so it is calm by construction; feasibility itself is the emergency gate's
+// job (§3.10a), not the bands'. Bands move only when reality slips against the plan:
+//   notice = planned date passed, milestone incomplete
+//   urgent = latest-safe passed, or ≤2d away after a slip
+function band(m, today) {
+  if (m.complete) return "calm";
+  const toSafe = daysBetween(today, m.latest_safe_date);
+  if (toSafe <= 0) return "urgent";
+  if (daysBetween(today, m.planned_date) < 0) return toSafe <= 2 ? "urgent" : "notice";
   return "calm";
 }
 
@@ -305,10 +333,13 @@ function validateRanker(out, validIds) {
 }
 
 const MENTAL_VERBS = /\b(think|plan|consider|review|understand|decide|figure out|reflect)\b/i;
+// cheap tripwire for known prescriptive tells — the critic carries the real judgment
+const PRESCRIPTIVE = /\b(leftmost|rightmost|first (?:\w+ )?(?:words?|things?) that come to mind)\b/i;
 function codeCheckSteps(steps) {
   const errs = [];
   steps.forEach((s) => {
     if (MENTAL_VERBS.test(s.action)) errs.push({ n: s.n, reason: `mental verb: "${s.action}"` });
+    if (PRESCRIPTIVE.test(s.action)) errs.push({ n: s.n, reason: `prescriptive content: "${s.action}"` });
     if (s.p90 > 15) errs.push({ n: s.n, reason: `p90 ${s.p90} > 15 min ceiling` });
     if (/\band then\b/i.test(s.action)) errs.push({ n: s.n, reason: "chained actions" });
   });
@@ -336,13 +367,20 @@ function runSelfTests() {
     { ordinal: 2, title: "M2", deliverable: "Feedback in", task_ids: ["b"], is_scoping: false },
     { ordinal: 3, title: "M3", deliverable: "Final filed", task_ids: ["c"], is_scoping: false },
   ];
-  t("date solver: derived pace = totalP50/days (L20)", () => {
+  t("date solver: pace = remaining p50 / days-to-buffer-target (L20)", () => {
     const r = solveRoute(tasks, ms, "2026-07-30", "2026-08-29", "p10");
-    return Math.abs(r.pace - 300 / 30) < 1e-9 || `pace ${r.pace}`;
+    // horizon 30d → reserve 5d → work deadline 2026-08-24 → 300/25
+    return (Math.abs(r.pace - 300 / 25) < 1e-9 && r.workDeadline === "2026-08-24") || `pace ${r.pace} wd ${r.workDeadline}`;
   });
-  t("date solver: last milestone planned = deadline", () => {
+  t("buffer: last milestone planned = deadline − reserve, latest-safe = deadline", () => {
     const r = solveRoute(tasks, ms, "2026-07-30", "2026-08-29", "p10");
-    return r.milestones[2].planned_date === "2026-08-29" || r.milestones[2].planned_date;
+    const last = r.milestones[2];
+    return (last.planned_date === "2026-08-24" && last.latest_safe_date === "2026-08-29" && last.slack_days === r.reserveDays) || JSON.stringify(last);
+  });
+  t("done-aware: completed tasks leave pace and sums", () => {
+    const withDone = tasks.map((t) => (t.id === "a" ? { ...t, done: true } : t));
+    const r = solveRoute(withDone, ms, "2026-08-10", "2026-08-29", "p10");
+    return (r.totalP50 === 180 && r.milestones[0].complete === true) || `p50 ${r.totalP50} complete ${r.milestones[0].complete}`;
   });
   t("slack p10-mode is non-negative day one", () => {
     const r = solveRoute(tasks, ms, "2026-07-30", "2026-08-29", "p10");
@@ -352,9 +390,19 @@ function runSelfTests() {
     const r = solveRoute(tasks, ms, "2026-07-30", "2026-08-29", "spec");
     return r.milestones.slice(0, 2).every((m) => m.slack_days <= 0) || "unexpectedly positive";
   });
-  t("band: ≤2 days slack is urgent", () => band(2, 30) === "urgent" || band(2, 30));
-  t("band: 20% of horizon is notice", () => band(6, 30) === "notice" || band(6, 30));
-  t("band: 50% of horizon is calm", () => band(15, 30) === "calm" || band(15, 30));
+  t("band: fresh route is calm end-to-end — terminal milestone included", () => {
+    const r = solveRoute(tasks, ms, "2026-07-30", "2026-08-29", "p10");
+    const bands = r.milestones.map((m) => band(m, "2026-07-30"));
+    return bands.every((b) => b === "calm") || bands.join(",");
+  });
+  t("band: slipped planned date → notice", () =>
+    band({ complete: false, planned_date: "2026-08-01", latest_safe_date: "2026-08-20" }, "2026-08-05") === "notice" || "not notice");
+  t("band: latest-safe ≤2d after a slip → urgent", () =>
+    band({ complete: false, planned_date: "2026-08-01", latest_safe_date: "2026-08-06" }, "2026-08-05") === "urgent" || "not urgent");
+  t("band: latest-safe passed → urgent", () =>
+    band({ complete: false, planned_date: "2026-08-01", latest_safe_date: "2026-08-04" }, "2026-08-05") === "urgent" || "not urgent");
+  t("band: complete milestone stays calm whatever the date", () =>
+    band({ complete: true, planned_date: "2026-08-01", latest_safe_date: "2026-08-02" }, "2026-09-20") === "calm" || "not calm");
   t("p10 gate fires only when best case can't fit", () => {
     const g1 = emergencyGate(tasks, "2026-07-30", "2026-08-29", 10); // cap 300 ≥ p10 150
     const g2 = emergencyGate(tasks, "2026-07-30", "2026-08-03", 10); // cap 40 < 150
@@ -460,41 +508,53 @@ Due end of September.
 
 /* ============================================================ UI */
 const css = `
-:root{
-  --bg:#111210; --panel:#1a1c18; --panel2:#22241f; --line:#33362e;
-  --ink:#e8e6df; --dim:#8f948a; --yellow:#f5c518; --yellow-dim:#8a7415;
-  --green:#7fb069; --red:#e4572e; --amber:#f0a202; --blue:#6ea4bf;
-}
+/* component layer on the shadcn preset tokens — legacy var names are aliased in index.css */
 .sona *{box-sizing:border-box}
-.sona{background:var(--bg);color:var(--ink);font-family:'Chivo',sans-serif;min-height:100vh;
-  background-image:radial-gradient(circle at 15% 0%, #1c1e17 0%, transparent 50%),
-  repeating-linear-gradient(0deg, transparent 0 23px, rgba(245,197,24,0.025) 23px 24px);}
-.sona .mono{font-family:'JetBrains Mono',monospace}
+.sona{background:var(--background);color:var(--foreground);font-family:'Chivo',ui-sans-serif,sans-serif;min-height:100vh;
+  background-image:radial-gradient(circle at 15% 0%, color-mix(in oklch, var(--chart-5) 12%, transparent) 0%, transparent 55%);}
+.sona .mono{font-family:'JetBrains Mono',ui-monospace,monospace}
 .sona h1{font-weight:900;letter-spacing:-0.02em}
-.sona .card{background:var(--panel);border:1px solid var(--line);border-radius:10px}
-.sona .btn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:7px;
-  padding:6px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;transition:all .15s}
-.sona .btn:hover{border-color:var(--yellow);color:var(--yellow)}
-.sona .btn.primary{background:var(--yellow);color:#111;border-color:var(--yellow);font-weight:700}
-.sona .btn.primary:hover{background:#ffd83d;color:#111}
-.sona .btn:disabled{opacity:.35;cursor:not-allowed}
-.sona .tab{padding:8px 14px;border:none;background:none;color:var(--dim);cursor:pointer;
-  font-family:'JetBrains Mono',monospace;font-size:12px;border-bottom:2px solid transparent}
-.sona .tab.on{color:var(--yellow);border-bottom-color:var(--yellow)}
-.sona textarea,.sona input,.sona select{background:#141511;border:1px solid var(--line);color:var(--ink);
-  border-radius:7px;padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px;width:100%}
+.sona .card{background:var(--card);color:var(--card-foreground);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:0 1px 2px 0 rgb(0 0 0 / 0.05)}
+.sona .btn{background:var(--secondary);border:1px solid var(--border);color:var(--secondary-foreground);
+  border-radius:calc(var(--radius) - 2px);padding:6px 12px;font-family:'JetBrains Mono',monospace;font-size:12px;
+  cursor:pointer;transition:all .15s}
+.sona .btn:hover{border-color:var(--ring);background:color-mix(in oklch, var(--secondary) 80%, var(--foreground) 6%)}
+.sona .btn.primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary);font-weight:700}
+.sona .btn.primary:hover{background:color-mix(in oklch, var(--primary) 88%, var(--primary-foreground) 12%)}
+.sona .btn:disabled{opacity:.4;cursor:not-allowed}
+.sona .btn:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.sona .tab{padding:8px 14px;border:none;background:none;color:var(--muted-foreground);cursor:pointer;
+  font-family:'JetBrains Mono',monospace;font-size:12px;border-bottom:2px solid transparent;transition:color .15s}
+.sona .tab.on{color:var(--chart-2);border-bottom-color:var(--chart-2)}
+.sona textarea,.sona input,.sona select{background:transparent;border:1px solid var(--input);color:var(--foreground);
+  border-radius:calc(var(--radius) - 2px);padding:8px;font-family:'JetBrains Mono',monospace;font-size:12px;width:100%}
+.sona textarea:focus-visible,.sona input:focus-visible,.sona select:focus-visible{outline:2px solid var(--ring);outline-offset:-1px}
 .sona .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;flex:none}
-.sona pre{background:#0d0e0b;border:1px solid var(--line);border-radius:7px;padding:10px;
-  font-size:11px;overflow:auto;max-height:280px;white-space:pre-wrap;word-break:break-word;
-  font-family:'JetBrains Mono',monospace;color:#c9cec2}
-.sona .badge{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 7px;border-radius:4px;
-  border:1px solid var(--line);text-transform:uppercase;letter-spacing:.05em}
+.sona pre{background:color-mix(in oklch, var(--background) 70%, var(--card) 30%);border:1px solid var(--border);
+  border-radius:calc(var(--radius) - 2px);padding:10px;font-size:11px;overflow:auto;max-height:280px;
+  white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;color:var(--muted-foreground)}
+.sona .badge{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 7px;border-radius:calc(var(--radius) - 4px);
+  border:1px solid var(--border);text-transform:uppercase;letter-spacing:.05em}
 .sona details>summary{cursor:pointer;list-style:none}
 .sona details>summary::-webkit-details-marker{display:none}
-.sona .yline{height:3px;background:repeating-linear-gradient(90deg,var(--yellow) 0 26px,transparent 26px 40px);border-radius:2px}
+.sona .yline{height:3px;background:repeating-linear-gradient(90deg,var(--chart-2) 0 26px,transparent 26px 40px);border-radius:2px}
+/* ── student-facing session styling (day tab) ── */
+.sona .step-card{display:flex;gap:12px;align-items:flex-start;background:var(--secondary);
+  border:1px solid var(--border);border-radius:calc(var(--radius) + 4px);padding:14px 16px;margin-bottom:10px}
+.sona .step-check{appearance:none;-webkit-appearance:none;width:22px;height:22px;flex:none;margin-top:1px;
+  border:2px solid var(--muted-foreground);border-radius:50%;cursor:pointer;display:grid;place-content:center;transition:all .15s}
+.sona .step-check:checked{border-color:var(--chart-2);background:var(--chart-2)}
+.sona .step-check:checked::after{content:"";width:10px;height:6px;border:2px solid var(--primary-foreground);
+  border-top:none;border-right:none;transform:rotate(-45deg) translateY(-1px)}
+.sona .chip{display:inline-flex;align-items:center;gap:6px;background:var(--secondary);border:1px solid var(--border);
+  border-radius:999px;padding:4px 12px;font-size:12px;color:var(--muted-foreground)}
+.sona .chip::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--warning)}
+.sona .reassure{background:color-mix(in oklch, var(--warning) 10%, var(--card));border:1px solid color-mix(in oklch, var(--warning) 35%, transparent);
+  border-radius:var(--radius);padding:12px 16px;font-style:italic;color:var(--warning);font-size:13px}
 `;
 
-const bandColor = { calm: "var(--green)", notice: "var(--amber)", urgent: "var(--red)" };
+const bandColor = { calm: "var(--success)", notice: "var(--warning)", urgent: "var(--destructive)" };
 
 function Badge({ children, color }) {
   return (
@@ -547,6 +607,7 @@ function SonaConsole() {
   const [title, setTitle] = useState(S?.title ?? "Research Methods — final assignment");
   const [raw, setRaw] = useState(S?.raw ?? SAMPLE);
   const [slackMode, setSlackMode] = useState(S?.slackMode ?? "p10");
+  const [theme, setTheme] = useState("dark");
   const [prompts, setPrompts] = useState(() => S?.prompts ?? JSON.parse(JSON.stringify(PROMPTS_V1)));
 
   const [trace, setTrace] = useState(S?.trace ?? []);
@@ -669,7 +730,7 @@ function SonaConsole() {
       const out = await llmStage("route_planner", p, prompts.route.version, (o) => validateRoute(o, live));
       const solved = codeStage("date_solver (§3.7)", { tasks: live, milestones: out.milestones, today, deadline, slackMode }, (i) => {
         const r = solveRoute(i.tasks, i.milestones, i.today, i.deadline, i.slackMode);
-        return { derived_pace_min_per_day: +r.pace.toFixed(1), note: "pace = Σp50 / days-to-deadline — L20, nothing declared", milestones: r.milestones.map((m) => ({ ordinal: m.ordinal, title: m.title, planned_date: m.planned_date, latest_safe_date: m.latest_safe_date, slack_days: m.slack_days, band: band(m.slack_days, Math.max(1, daysBetween(i.today, m.planned_date))) })) };
+        return { derived_pace_min_per_day: +r.pace.toFixed(1), reserve_days: r.reserveDays, work_deadline: r.workDeadline, note: "pace = Σ remaining p50 / days-to-buffer-target (deadline − 15%) — L20, nothing declared", milestones: r.milestones.map((m) => ({ ordinal: m.ordinal, title: m.title, planned_date: m.planned_date, latest_safe_date: m.latest_safe_date, slack_days: m.slack_days, complete: m.complete, band: band(m, i.today) })) };
       }, [slackMode === "spec" ? "SPEC-LITERAL mode: §3.7 step 3 as written (p90) — expect slack ≤ 0, see Tests tab" : "p10-consistent mode: latest-safe uses p10, matching §3.10a's 'even the best case' convention"]);
       setRoute(solved);
     } catch (e) {}
@@ -692,7 +753,6 @@ function SonaConsole() {
       const p = prompts.ranker.text.replace("{task_lines}", lines);
       const out = await llmStage("importance_ranker", p, prompts.ranker.version, (o) => validateRanker(o, live.map((t) => t.id)));
       setRanked(out);
-      setTasks((ts) => ts.map((t) => ({ ...t, slack: 0 })));
     } catch (e) {}
     setBusy(null);
   }
@@ -704,11 +764,16 @@ function SonaConsole() {
   }
 
   /* --- stage 5: Generator + Critic loop (max 2 rounds, fail loud) --- */
-  async function runBreakdown() {
+  async function runBreakdown(taskIdArg) {
     setBusy("steps");
     try {
-      const firstId = ranked.task_ids[0];
-      const task = tasks.find((t) => t.id === firstId);
+      // explicit id wins; otherwise head of the mood-ordered queue (not-done only).
+      const wanted = typeof taskIdArg === "string" ? taskIdArg : null;
+      const task =
+        (wanted && tasks.find((t) => t.id === wanted)) ||
+        surfaced[0] ||
+        tasks.find((t) => ranked.task_ids.includes(t.id) && !t.done);
+      if (!task) { setBusy(null); return; }
       let round = 0, current = null, failures = null, warning = false;
       while (round < 2) {
         round++;
@@ -739,9 +804,9 @@ function SonaConsole() {
   function runMood(m) {
     setMood(m);
     codeStage(`mood_filter (${m})`, m, (mm) => {
-      const r = moodFilter(tasks.map((t) => ({ ...t, slack: 0 })), mm);
-      return { mood: mm, surfaced: r.map((t) => `${t.id} · ${t.title}`), rule: mm === "focused" ? "all, highest cognitive load first" : mm === "not_focused" ? "one task only — easiest win" : "all, ascending slack" };
-    }, ["deterministic filter on pre-computed plan — no model call, L11"]);
+      const r = moodFilter(tasks.map((t) => ({ ...t, slack: taskSlack[t.id] ?? 0 })), mm);
+      return { mood: mm, surfaced: r.map((t) => `${t.id} · ${t.title}`), rule: mm === "focused" ? "all, highest cognitive load first" : mm === "not_focused" ? "one task only — easiest win" : "all, ascending milestone slack" };
+    }, ["deterministic filter on pre-computed plan — no model call, L11 — reorders the day queue live"]);
   }
 
   /* --- day sim: tick + session boundary reflow --- */
@@ -752,12 +817,37 @@ function SonaConsole() {
       logPred({ entity_type: "micro_step_actual", entity_id: `${steps.taskId}/s${s.n}`, predicted_p50: s.p50, predicted_p90: s.p90, actual_minutes: +s.actual, censored: false, prompt_version: prompts.generator.version });
     });
     setSteps((st) => ({ ...st, list: st.list.map((x) => (x.done ? { ...x, logged: true } : x)) }));
-    const committed = ranked ? ranked.task_ids.slice(0, 3) : [steps.taskId];
+    const allDone = steps.list.every((x) => x.done);
+    const committed = (ranked ? ranked.task_ids.slice(0, 3) : [steps.taskId]).filter((id) => {
+      const t = tasks.find((x) => x.id === id);
+      return t && !t.done;
+    });
     const optional = ranked ? ranked.task_ids.slice(3) : [];
     const r = codeStage("reflow (§5, session boundary)", null, () => reflow(steps.list, committed, optional),
       ["three-way branch: silent / drop optional tier / surface — never per-tick"]);
     setSessionLog((l) => [...l, r]);
+    if (allDone) {
+      setTasks((ts) => ts.map((t) => (t.id === steps.taskId ? { ...t, done: true } : t)));
+      addTrace({ step: "task_complete", kind: "code", status: "ok", duration_ms: 0, output: { task: steps.taskId, wrote: "task.done = true" }, notes: ["all micro-steps ticked → parent task done, session cleared, queue advances"] });
+      setSteps(null);
+    }
   }
+
+  /* --- day queue: milestone slack per task + mood-ordered surfaced list --- */
+  const taskSlack = useMemo(() => {
+    if (!route) return {};
+    const map = {};
+    route.milestones.forEach((m) => (tasksOfMilestone(m.ordinal) || []).forEach((id) => (map[id] = m.slack_days)));
+    return map;
+  }, [route, trace]);
+  const surfaced = useMemo(() => {
+    if (!ranked || !tasks) return [];
+    const pool = ranked.task_ids
+      .map((id) => tasks.find((t) => t.id === id))
+      .filter((t) => t && !t.done)
+      .map((t) => ({ ...t, slack: taskSlack[t.id] ?? 0 }));
+    return mood ? moodFilter(pool, mood) : pool;
+  }, [ranked, tasks, mood, taskSlack]);
 
   /* --- emergency gate view --- */
   const gate = useMemo(() => {
@@ -777,12 +867,12 @@ function SonaConsole() {
     { key: "triage", label: `2 · Triage (${triageQueue.length} open)`, kind: "user", ready: !!tasks, done: tasks && triageQueue.length === 0, run: null },
     { key: "route", label: "3 · Route Planner + date solver", kind: "llm+code", ready: canRoute, done: !!route, run: runRoute },
     { key: "rank", label: "4 · Importance Ranker", kind: "llm", ready: !!route, done: !!ranked, run: runRanker },
-    { key: "steps", label: "5 · Generator ⇄ Critic (≤2)", kind: "llm", ready: !!ranked, done: !!steps, run: runBreakdown },
+    { key: "steps", label: "5 · Generator ⇄ Critic (≤2)", kind: "llm", ready: !!ranked, done: !!steps, run: () => runBreakdown() },
     { key: "mood", label: "6 · Mood variants", kind: "code", ready: !!ranked, done: !!mood, run: () => runMood("middle") },
   ];
 
   return (
-    <div className="sona">
+    <div className={"sona" + (theme === "dark" ? " dark" : "")}>
       <style>{css}</style>
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 20px 80px" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 6 }}>
@@ -791,6 +881,7 @@ function SonaConsole() {
           <span className="mono" style={{ marginLeft: "auto", fontSize: 11, color: "var(--dim)" }}>
             L18 route confirmation: {routeConfirmedAt ? <span style={{ color: "var(--green)" }}>confirmed {routeConfirmedAt}</span> : route ? <span style={{ color: "var(--amber)" }}>● pending — proceeding on proposal</span> : "—"}
           </span>
+          <button className="btn" onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}>{theme === "dark" ? "☀ light" : "☾ dark"}</button>
           <button className="btn" onClick={exportSession}>save session</button>
           <label className="btn" style={{ display: "inline-block" }}>
             load<input type="file" accept="application/json" style={{ display: "none" }} onChange={(e) => e.target.files[0] && importSession(e.target.files[0])} />
@@ -918,7 +1009,7 @@ function SonaConsole() {
                 {route && (
                   <>
                     <div className="mono" style={{ fontSize: 12, color: "var(--dim)" }}>
-                      derived pace <b style={{ color: "var(--yellow)" }}>{route.derived_pace_min_per_day} min/day</b> — Σp50 ÷ days, nothing declared (L20) · slack mode: {slackMode}
+                      derived pace <b style={{ color: "var(--yellow)" }}>{route.derived_pace_min_per_day} min/day</b> — Σ remaining p50 ÷ days to buffer target {route.work_deadline} (reserve {route.reserve_days}d ≈ 15%), nothing declared (L20) · slack mode: {slackMode}
                     </div>
                     {route.milestones.map((m) => (
                       <div key={m.ordinal} className="card" style={{ padding: 14, borderLeft: `4px solid ${bandColor[m.band]}` }}>
@@ -933,7 +1024,7 @@ function SonaConsole() {
                       </div>
                     ))}
                     <div className="mono" style={{ fontSize: 11, color: "var(--dim)" }}>
-                      Band = rung 3 of the reroute ladder: visual weight only, no text, no model call. Thresholds (proposed): urgent ≤2d or &lt;10% of horizon · notice &lt;25% · else calm.
+                      Band = rung 3 of the reroute ladder: deviation-only, no model call. A fresh confirmed route is calm by construction (plan reserves ~15% of horizon; feasibility itself = emergency gate §3.10a). notice = planned date slipped · urgent = latest-safe passed or ≤2d after a slip.
                     </div>
                   </>
                 )}
@@ -958,23 +1049,46 @@ function SonaConsole() {
                     {["focused", "middle", "not_focused"].map((m) => (
                       <button key={m} className={"btn" + (mood === m ? " primary" : "")} onClick={() => runMood(m)}>{m}</button>
                     ))}
-                    <span className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>deterministic filter, zero morning latency (L11) — result in trace</span>
+                    <span className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>deterministic filter, zero morning latency (L11) — reorders the queue below</span>
+                  </div>
+                )}
+                {ranked && (
+                  <div className="card" style={{ padding: 14 }}>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--yellow)", marginBottom: 8 }}>QUEUE — mood-ordered · done tasks drop out</div>
+                    {surfaced.length === 0 && <div className="mono" style={{ fontSize: 12, color: "var(--green)" }}>queue clear — every surfaced task is done</div>}
+                    {surfaced.map((t) => (
+                      <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", borderBottom: "1px solid var(--line)" }}>
+                        <span style={{ fontSize: 13, flex: 1, color: steps?.taskId === t.id ? "var(--yellow)" : "var(--ink)" }}>{t.title}</span>
+                        <Badge>p50 {t.p50}m</Badge>
+                        <button className="btn" disabled={busy === "steps"} onClick={() => runBreakdown(t.id)}>{steps?.taskId === t.id ? "re-chunk ↻" : "break down →"}</button>
+                      </div>
+                    ))}
                   </div>
                 )}
                 {steps && (
-                  <div className="card" style={{ padding: 14 }}>
-                    <div className="mono" style={{ fontSize: 11, color: "var(--yellow)", marginBottom: 8 }}>
-                      SESSION — {steps.taskTitle} {steps.quality_warning && <Badge color="var(--amber)">quality_warning</Badge>}
+                  <div className="card" style={{ padding: 22 }}>
+                    <div className="mono" style={{ fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--muted-foreground)", marginBottom: 6 }}>
+                      Breaking it down {steps.quality_warning && <Badge color="var(--warning)">quality_warning</Badge>}
+                    </div>
+                    <div style={{ fontSize: 22, fontWeight: 900, lineHeight: 1.25, marginBottom: 4 }}>{steps.taskTitle}</div>
+                    <div style={{ color: "var(--muted-foreground)", fontSize: 14, marginBottom: 14 }}>Let's make this feel smaller.</div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+                      <span className="chip">About {steps.list.filter((s) => !s.done).reduce((a, s) => a + (+s.p50 || 0), 0)} min remaining</span>
+                      <span className="chip">{steps.list.filter((s) => !s.done).length} small step{steps.list.filter((s) => !s.done).length === 1 ? "" : "s"} ahead</span>
                     </div>
                     {steps.list.map((s) => (
-                      <div key={s.n} style={{ display: "flex", gap: 10, alignItems: "center", padding: "5px 0", borderBottom: "1px solid var(--line)" }}>
-                        <input type="checkbox" checked={s.done} onChange={(e) => tick(s.n, e.target.checked)} style={{ width: 16, height: 16 }} />
-                        <span style={{ fontSize: 13, flex: 1, textDecoration: s.done ? "line-through" : "none", color: s.done ? "var(--dim)" : "var(--ink)" }}>{s.n}. {s.action}</span>
-                        <Badge>p50 {s.p50} · p90 {s.p90}</Badge>
-                        {s.done && <span className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>actual <input type="number" value={s.actual} onChange={(e) => setActual(s.n, e.target.value)} style={{ width: 52, padding: 2, display: "inline-block" }} />m</span>}
+                      <div key={s.n} className="step-card" style={{ opacity: s.done ? 0.55 : 1 }}>
+                        <input type="checkbox" className="step-check" checked={s.done} onChange={(e) => tick(s.n, e.target.checked)} />
+                        <span style={{ flex: 1 }}>
+                          <span style={{ fontSize: 15, fontWeight: 700, display: "block", textDecoration: s.done ? "line-through" : "none" }}>{s.action}</span>
+                          {s.reassurance && <span style={{ fontSize: 13, color: "var(--muted-foreground)", display: "block", marginTop: 2 }}>{s.reassurance}</span>}
+                          {s.done && <span className="mono" style={{ fontSize: 10, color: "var(--muted-foreground)", display: "block", marginTop: 6 }}>actual <input type="number" value={s.actual} onChange={(e) => setActual(s.n, e.target.value)} style={{ width: 56, padding: 2, display: "inline-block" }} />m</span>}
+                        </span>
+                        <span className="mono" style={{ fontSize: 11, color: "var(--muted-foreground)", flex: "none", marginTop: 4 }}>~{s.p50} min</span>
                       </div>
                     ))}
-                    <button className="btn primary" style={{ marginTop: 10 }} onClick={endSession}>end session → reflow (§5)</button>
+                    <div className="reassure" style={{ marginTop: 4 }}>It's okay if this stays rough. We're just starting.</div>
+                    <button className="btn primary" style={{ marginTop: 14 }} onClick={endSession}>end session → reflow (§5)</button>
                     {sessionLog.map((r, i) => (
                       <div key={i} className="mono" style={{ fontSize: 11, marginTop: 8, color: r.branch === "surface" ? "var(--amber)" : "var(--green)" }}>
                         session {i + 1}: <b>{r.branch}</b>{r.branch === "silent" && " — no UI change, Maps doesn't announce recalculating"}{r.branch === "drop_optional" && " — optional tier dropped, silently"}{r.branch === "surface" && ` — took longer than we thought. ${r.sessionsNeeded} more session${r.sessionsNeeded > 1 ? "s" : ""} should do it. [Take 5] [Keep going] [Stop here]`}
